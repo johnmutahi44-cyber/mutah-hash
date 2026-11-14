@@ -83,12 +83,13 @@ if(path==="/api/withdrawals"&&req.method==="POST"){
 }
 if(path==="/api/admin/dashboard"&&req.method==="GET"){
  if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
- const [summary,payments,withdrawals]=await Promise.all([
+ const [summary,users,payments,withdrawals]=await Promise.all([
   env.DB.prepare("SELECT COUNT(*) AS total_users,COALESCE(SUM(activated),0) AS activated_users,COALESCE(SUM(mining_balance_sats),0) AS virtual_btc_sats,COALESCE(SUM(referral_balance_cents),0) AS referral_cents FROM users").first<any>(),
+  env.DB.prepare("SELECT id,email,display_name,activated,status,referral_code,mining_balance_sats,referral_balance_cents,created_at FROM users ORDER BY created_at DESC LIMIT 100").all<any>(),
   env.DB.prepare("SELECT reference,user_id,amount_minor,currency,phone_number,status,created_at,paid_at FROM payments ORDER BY created_at DESC LIMIT 50").all<any>(),
   env.DB.prepare("SELECT w.id,w.user_id,w.asset,w.amount_sats,w.amount_cents,w.destination,w.status,w.requested_at,u.email FROM withdrawals w JOIN users u ON u.id=w.user_id ORDER BY w.requested_at DESC LIMIT 100").all<any>()
  ]);
- return json({summary,payments:payments.results,withdrawals:withdrawals.results});
+ return json({summary,users:users.results,payments:payments.results,withdrawals:withdrawals.results});
 }
 if(path==="/api/admin/withdrawals/action"&&req.method==="POST"){
  if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
