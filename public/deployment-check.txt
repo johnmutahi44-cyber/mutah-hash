@@ -1,0 +1,1 @@
+Mutah Hash frontend deployment trigger. This file is safe to keep in the public assets directory.
