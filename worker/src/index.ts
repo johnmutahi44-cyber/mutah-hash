@@ -5,15 +5,15 @@ async function identity(req:Request,env:Env){const h=req.headers.get("authorizat
 const id=()=>crypto.randomUUID();const code=()=>crypto.randomUUID().replace(/-/g,"").slice(0,10).toUpperCase();
 async function user(env:Env,uid:string){return env.DB.prepare("SELECT * FROM users WHERE firebase_uid=?").bind(uid).first<any>();}
 async function resetInactiveBalance(env:Env,me:any){
- const last=me.last_hash_at?Date.parse(me.last_hash_at):0;
- if(me.session_active||!last||Date.now()-last<=72*3600000||me.mining_balance_sats<=0)return;
+ const anchor=me.last_hash_at||me.activated_at;
+ if(!anchor||Date.now()-Date.parse(anchor)<=72*3600000)return;
  const reservedRow=await env.DB.prepare("SELECT COALESCE(SUM(amount_sats),0) AS reserved FROM withdrawals WHERE user_id=? AND asset='BTC' AND status IN ('pending','approved')").bind(me.id).first<any>();
- const reserved=Number(reservedRow?.reserved||0),resetAmount=Math.max(0,me.mining_balance_sats-reserved),resetRef="RESET-"+me.id+"-"+last;
- if(resetAmount<=0)return;
- await env.DB.batch([
-  env.DB.prepare("UPDATE users SET mining_balance_sats=mining_balance_sats-?,last_inactivity_reset_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND last_hash_at=? AND mining_balance_sats=? AND last_hash_at<=datetime('now','-72 hours')").bind(resetAmount,me.id,me.last_hash_at,me.mining_balance_sats),
-  env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) SELECT ?,?, 'inactivity_reset',?,'completed',?,'Unreserved virtual HASH balance reset after 72 hours inactivity' WHERE EXISTS(SELECT 1 FROM users WHERE id=? AND mining_balance_sats=? AND last_inactivity_reset_at>=datetime('now','-2 seconds'))").bind(id(),me.id,-resetAmount,resetRef,me.id,reserved)
- ]);
+ const reserved=Number(reservedRow?.reserved||0),balance=Number(me.mining_balance_sats||0),resetAmount=Math.max(0,balance-reserved);
+ const resetRef="INACTIVITY-"+me.id+"-"+Date.parse(anchor);
+ const update=await env.DB.prepare("UPDATE users SET mining_balance_sats=?,session_active=0,session_ends_at=NULL,last_inactivity_reset_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND COALESCE(last_hash_at,activated_at)=? AND julianday(COALESCE(last_hash_at,activated_at))<=julianday('now','-72 hours') AND (last_inactivity_reset_at IS NULL OR julianday(last_inactivity_reset_at)<julianday(?))").bind(reserved,me.id,anchor,anchor).run();
+ if(update.meta.changes&&resetAmount>0){
+  await env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) VALUES(?,?, 'inactivity_reset',?,'completed',?,'Unreserved HASH rewards reset after 72 consecutive hours without a successful HASH claim')").bind(id(),me.id,-resetAmount,resetRef).run();
+ }
 }
 async function activate(env:Env,reference:string,transactionId:string){
  const p=await env.DB.prepare("SELECT * FROM payments WHERE reference=?").bind(reference).first<any>();
@@ -71,7 +71,7 @@ if(path==="/api/hash/claim"&&req.method==="POST"){
  const claimRef="HASH-"+me.id+"-"+end;
  const results=await env.DB.batch([
   env.DB.prepare("UPDATE users SET mining_balance_sats=mining_balance_sats+1500,session_active=0,last_hash_at=CURRENT_TIMESTAMP,session_ends_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND session_active=1 AND julianday(session_ends_at)<=julianday('now')").bind(me.id),
-  env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) SELECT ?,?,'hash_reward',1500,'completed',?,'Virtual HASH cycle reward' FROM users WHERE id=? AND session_active=0 AND last_hash_at>=datetime('now','-2 seconds')").bind(id(),me.id,claimRef,me.id)
+  env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) SELECT ?,?,'hash_reward',1500,'completed',?,'HASH cycle reward' FROM users WHERE id=? AND session_active=0 AND last_hash_at>=datetime('now','-2 seconds')").bind(id(),me.id,claimRef,me.id)
  ]);
  if(!results[0].meta.changes)return json({error:"This HASH session was already claimed or has not finished."},409);
  return json({message:"0.000015 virtual BTC units credited. Any eventual payout is manual review."});
