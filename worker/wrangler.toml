@@ -1,6 +1,7 @@
 name = "mutah-hash-api"
 main = "src/index.ts"
 compatibility_date = "2026-11-14"
+account_id = "c1ffb62293272a074d54b2bee6772ac2"
 
 [[d1_databases]]
 binding = "DB"
