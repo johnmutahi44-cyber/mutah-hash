@@ -1,4 +1,4 @@
-export interface Env{DB:D1Database;FIREBASE_PROJECT_ID:string;ADMIN_EMAIL:string;PAYSTACK_SECRET_KEY:string;PAYSTACK_WEBHOOK_SECRET:string}
+export interface Env{DB:D1Database;FIREBASE_PROJECT_ID:string;ADMIN_EMAIL:string;PAYSTACK_SECRET_KEY:string}
 const json=(data:unknown,status=200)=>new Response(JSON.stringify(data),{status,headers:{"content-type":"application/json","access-control-allow-origin":"*","access-control-allow-headers":"authorization,content-type","access-control-allow-methods":"GET,POST,OPTIONS"}});
 const b64=(s:string)=>Uint8Array.from(atob(s.replace(/-/g,"+").replace(/_/g,"/")),c=>c.charCodeAt(0));
 async function identity(req:Request,env:Env){const h=req.headers.get("authorization")||"";const token=h.startsWith("Bearer ")?h.slice(7):"";if(!token)throw new Error("Sign in required");const parts=token.split(".");if(parts.length!==3)throw new Error("Invalid login token");const header=JSON.parse(new TextDecoder().decode(b64(parts[0]))),claims=JSON.parse(new TextDecoder().decode(b64(parts[1])));if(claims.aud!==env.FIREBASE_PROJECT_ID||claims.iss!=="https://securetoken.google.com/"+env.FIREBASE_PROJECT_ID||claims.exp<Date.now()/1000||!claims.sub)throw new Error("Login token expired or invalid");const keys=await fetch("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com").then(r=>r.json()) as {keys:Array<JsonWebKey & {kid:string}>};const jwk=keys.keys.find(k=>k.kid===header.kid);if(!jwk)throw new Error("Unable to verify login token");const key=await crypto.subtle.importKey("jwk",jwk,{name:"RSASSA-PKCS1-v1_5",hash:"SHA-256"},false,["verify"]);const ok=await crypto.subtle.verify("RSASSA-PKCS1-v1_5",key,b64(parts[2]),new TextEncoder().encode(parts[0]+"."+parts[1]));if(!ok)throw new Error("Invalid login signature");return{uid:claims.sub as string,email:String(claims.email||"").toLowerCase(),emailVerified:claims.email_verified===true,name:String(claims.name||"")};}
@@ -45,11 +45,12 @@ if(path==="/api/payment/initiate"&&req.method==="POST"){if(me.activated)return j
 if(path==="/api/hash/start"&&req.method==="POST"){
  if(!me.activated)return json({error:"Activate your account first."},403);
  const now=Date.now(),last=me.last_hash_at?Date.parse(me.last_hash_at):0;
- if(last&&now-last>72*3600000&&me.mining_balance_sats>0){
-  const resetRef="RESET-"+me.id+"-"+last;
-  await env.DB.batch([
-   env.DB.prepare("UPDATE users SET mining_balance_sats=0,session_active=0,last_inactivity_reset_at=CURRENT_TIMESTAMP WHERE id=? AND last_hash_at=? AND mining_balance_sats=? AND last_hash_at<=datetime('now','-72 hours')").bind(me.id,me.last_hash_at,me.mining_balance_sats),
-   env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) SELECT ?,?, 'inactivity_reset',?,'completed',?,'Virtual HASH balance reset after 72 hours inactivity' WHERE EXISTS(SELECT 1 FROM users WHERE id=? AND mining_balance_sats=0 AND last_inactivity_reset_at>=datetime('now','-2 seconds'))").bind(id(),me.id,-me.mining_balance_sats,resetRef,me.id)
+ if(!me.session_active&&last&&now-last>72*3600000&&me.mining_balance_sats>0){
+  const reservedRow=await env.DB.prepare("SELECT COALESCE(SUM(amount_sats),0) AS reserved FROM withdrawals WHERE user_id=? AND asset='BTC' AND status IN ('pending','approved')").bind(me.id).first<any>();
+  const reserved=Number(reservedRow?.reserved||0),resetAmount=Math.max(0,me.mining_balance_sats-reserved),resetRef="RESET-"+me.id+"-"+last;
+  if(resetAmount>0)await env.DB.batch([
+   env.DB.prepare("UPDATE users SET mining_balance_sats=mining_balance_sats-?,last_inactivity_reset_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND last_hash_at=? AND mining_balance_sats=? AND last_hash_at<=datetime('now','-72 hours')").bind(resetAmount,me.id,me.last_hash_at,me.mining_balance_sats),
+   env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) SELECT ?,?, 'inactivity_reset',?,'completed',?,'Unreserved virtual HASH balance reset after 72 hours inactivity' WHERE EXISTS(SELECT 1 FROM users WHERE id=? AND mining_balance_sats=? AND last_inactivity_reset_at>=datetime('now','-2 seconds'))").bind(id(),me.id,-resetAmount,resetRef,me.id,reserved)
   ]);
  }
  const fresh=await user(env,who.uid);
