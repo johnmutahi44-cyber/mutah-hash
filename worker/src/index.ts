@@ -73,9 +73,10 @@ if(path==="/api/hash/claim"&&req.method==="POST"){
  return json({message:"0.000015 virtual BTC units credited. Any eventual payout is manual review."});
 }
 if(path==="/api/withdrawals"&&req.method==="POST"){
- const body=await req.json<any>(),asset=body.asset==="BTC"?"BTC":"USD",destination=String(body.destination||"").trim();
+ const body=await req.json<any>(),asset=body.asset==="BTC"?"BTC":body.asset==="USD"?"USD":null,destination=String(body.destination||"").trim();
+ if(!asset)return json({error:"Choose a valid reward balance."},400);
  if(!destination||destination.length>200)return json({error:"Enter valid payout destination details."},400);
- if(!me.activated)return json({error:"Activate your account before requesting a withdrawal."},403);
+ if(asset==="BTC"&&!me.activated)return json({error:"Activate your account before requesting a HASH withdrawal."},403);
  const requestId=id();
  const result=await env.DB.prepare("INSERT INTO withdrawals(id,user_id,asset,amount_sats,amount_cents,destination,status) SELECT ?,u.id,?,CASE WHEN ?='BTC' THEN u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0) ELSE 0 END,CASE WHEN ?='USD' THEN u.referral_balance_cents-COALESCE((SELECT SUM(amount_cents) FROM withdrawals WHERE user_id=u.id AND asset='USD' AND status IN ('pending','approved')),0) ELSE 0 END,?,'pending' FROM users u WHERE u.id=? AND (CASE WHEN ?='BTC' THEN u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0) ELSE u.referral_balance_cents-COALESCE((SELECT SUM(amount_cents) FROM withdrawals WHERE user_id=u.id AND asset='USD' AND status IN ('pending','approved')),0) END)>0").bind(requestId,asset,asset,asset,destination,me.id,asset).run();
  if(!result.meta.changes)return json({error:"There is no unreserved balance available for this withdrawal."},400);
