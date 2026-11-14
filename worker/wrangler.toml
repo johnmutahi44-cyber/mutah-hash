@@ -10,3 +10,9 @@ database_id = "6192539f-75c8-4657-9e02-603a6b1c9310"
 [vars]
 FIREBASE_PROJECT_ID = "mutah-hash"
 ADMIN_EMAIL = "johnmutahi44@gmail.com"
+
+[observability]
+enabled = true
+
+[observability.traces]
+enabled = true
