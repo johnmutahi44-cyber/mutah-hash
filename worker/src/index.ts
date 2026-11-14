@@ -96,7 +96,7 @@ if(path==="/api/admin/withdrawals/action"&&req.method==="POST"){
  const body=await req.json<any>(),withdrawalId=String(body.id||""),action=String(body.action||"");
  if(!withdrawalId||!["approve","reject","paid"].includes(action))return json({error:"Invalid withdrawal action."},400);
  if(action==="approve"){const r=await env.DB.prepare("UPDATE withdrawals SET status='approved',reviewed_at=CURRENT_TIMESTAMP,admin_note=? WHERE id=? AND status='pending'").bind(String(body.note||"Approved for manual payout").slice(0,500),withdrawalId).run();if(!r.meta.changes)return json({error:"Only pending requests can be approved."},409);}
- if(action==="reject"){const r=await env.DB.prepare("UPDATE withdrawals SET status='rejected',reviewed_at=CURRENT_TIMESTAMP,admin_note=? WHERE id=? AND status='pending'").bind(String(body.note||"Rejected by admin").slice(0,500),withdrawalId).run();if(!r.meta.changes)return json({error:"Only pending requests can be rejected."},409);}
+ if(action==="reject"){const r=await env.DB.prepare("UPDATE withdrawals SET status='rejected',reviewed_at=CURRENT_TIMESTAMP,admin_note=? WHERE id=? AND status IN ('pending','approved')").bind(String(body.note||"Rejected by admin").slice(0,500),withdrawalId).run();if(!r.meta.changes)return json({error:"Only pending or approved requests can be rejected."},409);}
  if(action==="paid"){
   const w=await env.DB.prepare("SELECT * FROM withdrawals WHERE id=? AND status='approved'").bind(withdrawalId).first<any>();
   if(!w)return json({error:"Only approved requests can be marked paid."},409);
