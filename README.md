@@ -16,7 +16,7 @@ Mutah Hash is a mobile-first virtual rewards web app. It is **not Bitcoin mining
 - Activation is KSh 100 through Paystack Kenya M-Pesa.
 - Activation is granted only after a signed Paystack webhook or server-side verification confirms the exact reference, KES 10,000 minor units, successful status, and matching user metadata.
 - A second payment prompt is blocked while an earlier request is pending. Requests older than three minutes are verified before a retry is allowed.
-- A successful eligible referral activation credits the referrer KSh? No: **USD 7.00 virtual referral credit** (700 cents), once only.
+- A successful eligible referral activation credits the referrer **USD 7.00 in virtual referral credit** (700 cents), once only.
 - HASH sessions last 24 hours. A completed session credits 1,500 sats-equivalent virtual units (0.000015 virtual BTC units) once only.
 - The 72-hour inactivity reset applies only to unreserved virtual HASH balance; pending/approved withdrawal amounts remain reserved.
 - Withdrawal requests reserve available balance. Admin approval/rejection and manual-paid recording are server-side and idempotent.
