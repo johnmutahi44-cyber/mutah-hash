@@ -96,13 +96,33 @@ if(path==="/api/withdrawals"&&req.method==="POST"){
 }
 if(path==="/api/admin/dashboard"&&req.method==="GET"){
  if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
- const [summary,users,payments,withdrawals]=await Promise.all([
-  env.DB.prepare("SELECT COUNT(*) AS total_users,COALESCE(SUM(activated),0) AS activated_users,COALESCE(SUM(mining_balance_sats),0) AS virtual_btc_sats,COALESCE(SUM(referral_balance_cents),0) AS referral_cents FROM users").first<any>(),
-  env.DB.prepare("SELECT id,email,display_name,activated,status,referral_code,mining_balance_sats,referral_balance_cents,created_at FROM users ORDER BY created_at DESC LIMIT 100").all<any>(),
-  env.DB.prepare("SELECT p.reference,p.user_id,u.email,p.amount_minor,p.currency,p.phone_number,p.status,p.created_at,p.paid_at FROM payments p JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC LIMIT 50").all<any>(),
-  env.DB.prepare("SELECT w.id,w.user_id,w.asset,w.amount_sats,w.amount_cents,w.destination,w.network,w.status,w.requested_at,u.email FROM withdrawals w JOIN users u ON u.id=w.user_id ORDER BY w.requested_at DESC LIMIT 100").all<any>()
+ const page=Math.max(1,Math.min(1000,Number(url.searchParams.get("page")||1))),limit=50,offset=(page-1)*limit;
+ const [summary,users,payments,withdrawals,referrals]=await Promise.all([
+  env.DB.prepare("SELECT COUNT(*) AS total_users,COALESCE(SUM(activated),0) AS activated_users,COALESCE(SUM(mining_balance_sats),0) AS hash_rewards_sats,COALESCE(SUM(referral_balance_cents),0) AS referral_cents FROM users").first<any>(),
+  env.DB.prepare("SELECT id,email,display_name,activated,status,referral_code,mining_balance_sats,referral_balance_cents,created_at,activated_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>(),
+  env.DB.prepare("SELECT p.reference,p.user_id,u.email,p.amount_minor,p.currency,p.phone_number,p.status,p.created_at,p.paid_at FROM payments p JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>(),
+  env.DB.prepare("SELECT w.id,w.user_id,w.asset,w.amount_sats,w.amount_cents,w.destination,w.network,w.status,w.requested_at,u.email FROM withdrawals w JOIN users u ON u.id=w.user_id ORDER BY w.requested_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>(),
+  env.DB.prepare("SELECT r.id,r.referral_code,r.status,r.reward_cents,r.created_at,r.rewarded_at,referrer.email AS referrer_email,referred.email AS referred_email FROM referrals r JOIN users referrer ON referrer.id=r.referrer_user_id JOIN users referred ON referred.id=r.referred_user_id ORDER BY r.created_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>()
  ]);
- return json({summary,users:users.results,payments:payments.results,withdrawals:withdrawals.results});
+ return json({summary,users:users.results,payments:payments.results,withdrawals:withdrawals.results,referrals:referrals.results,page,page_size:limit});
+}
+if(path==="/api/admin/users/action"&&req.method==="POST"){
+ if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
+ const body=await req.json<any>(),userId=String(body.id||""),action=String(body.action||"");
+ if(!userId||!["activate","suspend","restore"].includes(action))return json({error:"Invalid account action."},400);
+ if(action==="activate"){
+  const r=await env.DB.prepare("UPDATE users SET activated=1,activated_at=COALESCE(activated_at,CURRENT_TIMESTAMP),status='active',updated_at=CURRENT_TIMESTAMP WHERE id=? AND EXISTS(SELECT 1 FROM payments WHERE user_id=? AND status='success' AND amount_minor=10000 AND currency='KES')").bind(userId,userId).run();
+  if(!r.meta.changes)return json({error:"This account cannot be activated until a successful KSh 100 payment is verified."},409);
+ }
+ if(action==="suspend"){
+  const r=await env.DB.prepare("UPDATE users SET status='suspended',updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(userId).run();
+  if(!r.meta.changes)return json({error:"Account not found."},404);
+ }
+ if(action==="restore"){
+  const r=await env.DB.prepare("UPDATE users SET status=CASE WHEN activated=1 THEN 'active' ELSE 'pending' END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='suspended'").bind(userId).run();
+  if(!r.meta.changes)return json({error:"Only suspended accounts can be restored."},409);
+ }
+ return json({message:"Account status updated.",user_id:userId,action});
 }
 if(path==="/api/admin/withdrawals/action"&&req.method==="POST"){
  if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
