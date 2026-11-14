@@ -1,0 +1,8 @@
+name = "mutah-hash-api"
+main = "src/index.ts"
+compatibility_date = "2026-11-14"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "mutah-hash-prod"
+database_id = "6192539f-75c8-4657-9e02-603a6b1c9310"
