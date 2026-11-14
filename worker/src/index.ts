@@ -63,7 +63,7 @@ if(path==="/api/admin/dashboard"&&req.method==="GET"){
  return json({summary,payments:payments.results,withdrawals:withdrawals.results});
 }
 if(path==="/api/admin/withdrawals/action"&&req.method==="POST"){
- if(who.email!==env.ADMIN_EMAIL.toLowerCase()||who.emailVerified!==true)return json({error:"Admin access denied."},403);
+ if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
  const body=await req.json<any>(),withdrawalId=String(body.id||""),action=String(body.action||"");
  if(!withdrawalId||!["approve","reject","paid"].includes(action))return json({error:"Invalid withdrawal action."},400);
  if(action==="approve"){const r=await env.DB.prepare("UPDATE withdrawals SET status='approved',reviewed_at=CURRENT_TIMESTAMP,admin_note=? WHERE id=? AND status='pending'").bind(String(body.note||"Approved for manual payout").slice(0,500),withdrawalId).run();if(!r.meta.changes)return json({error:"Only pending requests can be approved."},409);}
