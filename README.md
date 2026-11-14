@@ -19,7 +19,8 @@ Mutah Hash is a mobile-first virtual rewards web app. It is **not Bitcoin mining
 - A successful eligible referral activation credits the referrer **USD 7.00 in virtual referral credit** (700 cents), once only.
 - HASH sessions last 24 hours. A completed session credits 1,500 sats-equivalent virtual units (0.000015 virtual BTC units) once only.
 - The 72-hour inactivity reset applies only to unreserved virtual HASH balance; pending/approved withdrawal amounts remain reserved.
-- Withdrawal requests reserve available balance. Admin approval/rejection and manual-paid recording are server-side and idempotent.
+- Withdrawal requests reserve available balance. Members can choose BSC (BNB Smart Chain/BEP20), SEGWITBTC (BTC SegWit), BTC (Bitcoin), or ETH (Ethereum/ERC20). Lightning Network is shown as suspended and is rejected by the API. The app records the selected network and shows request history. Admin approval/rejection and manual-paid recording are server-side and idempotent; no automatic transfer is made.
+- The five-month withdrawal schedule mentioned in the original product discussion is not yet enforced because its exact timing and eligibility rules have not been confirmed.
 
 ## Admin access
 
