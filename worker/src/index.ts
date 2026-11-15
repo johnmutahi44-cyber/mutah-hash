@@ -22,7 +22,7 @@ async function activate(env:Env,reference:string,transactionId:string){
  await env.DB.batch([
   env.DB.prepare("UPDATE payments SET status='success',paystack_transaction_id=?,paid_at=COALESCE(paid_at,CURRENT_TIMESTAMP),verified_at=CURRENT_TIMESTAMP WHERE reference=? AND status='pending' AND amount_minor=10000 AND currency='KES'").bind(transactionId,reference),
   env.DB.prepare("UPDATE users SET activated=1,activated_at=COALESCE(activated_at,CURRENT_TIMESTAMP),status='active',updated_at=CURRENT_TIMESTAMP WHERE id=? AND EXISTS(SELECT 1 FROM payments WHERE reference=? AND status='success')").bind(p.user_id,reference),
-  env.DB.prepare("UPDATE referrals SET status='qualified',rewarded_at=CURRENT_TIMESTAMP,activation_reference=? WHERE referred_user_id=? AND status='pending_activation' AND EXISTS(SELECT 1 FROM payments WHERE reference=? AND status='success')").bind(reference,p.user_id,reference)
+  env.DB.prepare("UPDATE referrals SET status='qualified',activation_reference=? WHERE referred_user_id=? AND status='pending_activation' AND EXISTS(SELECT 1 FROM payments WHERE reference=? AND status='success')").bind(reference,p.user_id,reference)
  ]);
 }
 async function handle(req:Request,env:Env):Promise<Response>{if(req.method==="OPTIONS")return json({ok:true});const url=new URL(req.url),path=url.pathname;
