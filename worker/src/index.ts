@@ -79,7 +79,7 @@ if(path==="/api/paystack/webhook"&&req.method==="POST"){
 }
 try{const who=await identity(req,env);
 if(path==="/api/register"&&req.method==="POST"){const body=await req.json<any>(),existing=await user(env,who.uid);if(existing)return json({profile:existing});if(body.guidelinesAccepted!==true)return json({error:"Registration blocked: you must accept the Mutah Hash App & Community Guidelines."},400);const version=String(body.guidelinesVersion||"");if(version!=="2026-11-15-v3")return json({error:"The guidelines version is outdated or invalid. Refresh the app and review the current guidelines before registering."},409);if(!String(body.displayName||"").trim())return json({error:"Enter your full name before registering."},400);const ref=String(body.referralCode||"").trim().toUpperCase();const referrer=ref?await env.DB.prepare("SELECT id FROM users WHERE referral_code=?").bind(ref).first<any>():null;if(ref&&!referrer)return json({error:"This referral link is invalid. Please reopen the referral link shared with you and register again."},400);const uid=id(),refcode=code();await env.DB.batch([env.DB.prepare("INSERT INTO users(id,firebase_uid,email,display_name,referral_code,referred_by_user_id) VALUES(?,?,?,?,?,?)").bind(uid,who.uid,who.email,String(body.displayName||who.name||"").slice(0,80),refcode,referrer?.id||null),env.DB.prepare("INSERT INTO policy_consents(user_id,guidelines_version,accepted_at) VALUES(?,?,CURRENT_TIMESTAMP)").bind(uid,version)]);if(referrer&&referrer.id!==uid)await env.DB.prepare("INSERT OR IGNORE INTO referrals(id,referrer_user_id,referred_user_id,referral_code,status,reward_cents) VALUES(?,?,?,?, 'pending_activation',700)").bind(id(),referrer.id,uid,ref).run();return json({profile:await user(env,who.uid)});}
-let me=await user(env,who.uid);if(!me)return json({error:"Account profile not found. Please register again."},404);if(me.status==="suspended"&&path!=="/api/me")return json({error:"This account is suspended. Contact Mutah Hash support for a review."},403);await resetInactiveBalance(env,me);me=await user(env,who.uid);await accrueHashSession(env,me);me=await user(env,who.uid);
+let me=await user(env,who.uid);if(!me)return json({error:"Account profile not found. Please register again."},404);if(me.status==="suspended")return json({error:"This account has been blocked from Mutah Hash. Contact support for a review. "+String(me.block_reason||"")},403);await resetInactiveBalance(env,me);me=await user(env,who.uid);await accrueHashSession(env,me);me=await user(env,who.uid);
 if(path==="/api/me"){await resetInactiveBalance(env,me);await env.DB.prepare("INSERT OR IGNORE INTO referrals(id,referrer_user_id,referred_user_id,referral_code,status,reward_cents) SELECT lower(hex(randomblob(16))),u.referred_by_user_id,u.id,ref.referral_code,'pending_activation',700 FROM users u JOIN users ref ON ref.id=u.referred_by_user_id WHERE u.activated=0 AND NOT EXISTS(SELECT 1 FROM referrals r WHERE r.referred_user_id=u.id)").run();const profile=await user(env,who.uid);const qualified=await env.DB.prepare("SELECT COUNT(*) AS count FROM referrals r JOIN users u ON u.id=r.referred_user_id WHERE r.referrer_user_id=? AND r.status IN ('qualified','rewarded') AND u.activated=1").bind(me.id).first<any>();const referralStats=await env.DB.prepare("SELECT COUNT(*) AS total,COALESCE(SUM(CASE WHEN u.activated=0 THEN 1 ELSE 0 END),0) AS pending,COALESCE(SUM(CASE WHEN u.activated=1 THEN 1 ELSE 0 END),0) AS activated FROM users u WHERE u.referred_by_user_id=?").bind(me.id).first<any>();return json(profile.activated?{profile,qualified_referrals:Number(qualified?.count||0),total_referrals:Number(referralStats?.total||0),pending_referrals:Number(referralStats?.pending||0),activated_referrals:Number(referralStats?.activated||0),required_referrals:1}:{profile:{...profile,referral_code:"",referred_by_user_id:null},qualified_referrals:0,total_referrals:0,pending_referrals:0,activated_referrals:0});}
 if(path==="/api/payment/status"&&req.method==="GET"){
  const reference=String(url.searchParams.get("reference")||"").trim();
@@ -123,6 +123,43 @@ if(path==="/api/hash/start"&&req.method==="POST"){
 }
 if(path==="/api/hash/claim"&&req.method==="POST"){
  return json({error:"There is no separate AIRDROP claim while a session is active. Start a new AIRDROP after the current session ends."},409);
+}
+if(path==="/api/early-withdrawals"&&req.method==="GET"){
+ const rows=await env.DB.prepare("SELECT id,reason,payment_method,destination,document_name,document_mime,document_size,status,admin_reason,withdrawal_id,requested_at,reviewed_at FROM early_withdrawal_requests WHERE user_id=? ORDER BY requested_at DESC LIMIT 50").bind(me.id).all<any>();
+ return json({requests:rows.results});
+}
+if(path==="/api/early-withdrawals"&&req.method==="POST"){
+ if(!me.activated)return json({error:"Activate your account before requesting an early withdrawal."},403);
+ const activationRaw=me.activated_at?String(me.activated_at):"";
+ const activationDate=activationRaw?new Date(activationRaw.includes("T")?activationRaw:activationRaw.replace(" ","T")+"Z"):null;
+ if(!activationDate||Number.isNaN(activationDate.getTime()))return json({error:"Your verified activation date is unavailable."},403);
+ const opens=new Date(activationDate);opens.setMonth(opens.getMonth()+5);
+ if(Date.now()>=opens.getTime())return json({error:"Your normal five-month withdrawal period has opened. Please use the standard withdrawal request form."},409);
+ const body=await req.json<any>(),reason=String(body.reason||"").trim(),documentName=String(body.documentName||"").slice(0,180),documentMime=String(body.documentMime||""),documentBase64=String(body.documentBase64||""),paymentMethod=String(body.paymentMethod||""),destinationRaw=String(body.destination||"").trim();
+ if(reason.length<20||reason.length>2000)return json({error:"Explain your reason in at least 20 characters and no more than 2,000 characters."},400);
+ if(!["application/pdf","image/jpeg","image/png"].includes(documentMime)||!documentName||!documentBase64)return json({error:"Upload one PDF, JPG or PNG supporting document."},400);
+ if(documentBase64.length>1400000)return json({error:"The supporting document must be 1 MB or smaller."},413);
+ let bytes:Uint8Array;
+ try{const raw=atob(documentBase64);if(raw.length>1024*1024)return json({error:"The supporting document must be 1 MB or smaller."},413);bytes=Uint8Array.from(raw,c=>c.charCodeAt(0));}catch{return json({error:"The uploaded document could not be read."},400);}
+ let destination=destinationRaw;
+ if(!destination||destination.length>200)return json({error:"Enter valid payment receiver details."},400);
+ if(paymentMethod==="MPESA"||paymentMethod==="AIRTEL"){
+  let digits=destination.replace(/\D/g,"");
+  if(digits.length===10&&digits.startsWith("0"))digits="254"+digits.slice(1);
+  if(digits.length===9&&(digits.startsWith("7")||digits.startsWith("1")))digits="254"+digits;
+  if(!/^254[17]\d{8}$/.test(digits))return json({error:"Enter a valid Kenyan mobile-money number."},400);
+  destination=digits;
+ }else if(!["BSC","SEGWITBTC","BTC","ETH"].includes(paymentMethod))return json({error:"Choose M-Pesa, Airtel Money or a supported crypto network."},400);
+ const requestId=id();
+ await env.DB.prepare("INSERT INTO early_withdrawal_requests(id,user_id,reason,payment_method,destination,document_name,document_mime,document_size,document_blob,status) VALUES(?,?,?,?,?,?,?,?,?,'pending')").bind(requestId,me.id,reason,paymentMethod,destination,documentName,documentMime,bytes.length,bytes).run();
+ return json({message:"Your early withdrawal exception request and supporting document have been submitted for admin review. This is not approval or a payout.",request_id:requestId});
+}
+if(path.startsWith("/api/admin/early-withdrawals/")&&path.endsWith("/document")&&req.method==="GET"){
+ if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
+ const requestId=path.split("/")[4];
+ const row=await env.DB.prepare("SELECT document_blob,document_mime,document_name FROM early_withdrawal_requests WHERE id=?").bind(requestId).first<any>();
+ if(!row)return json({error:"Supporting document not found."},404);
+ return new Response(row.document_blob,{headers:{"content-type":row.document_mime,"content-disposition":"inline; filename*=UTF-8''"+encodeURIComponent(row.document_name),"cache-control":"private, no-store","access-control-allow-origin":"*","access-control-allow-headers":"authorization,content-type"}});
 }
 if(path==="/api/withdrawals"&&req.method==="GET"){
  const rows=await env.DB.prepare("SELECT id,asset,amount_sats,amount_cents,destination,network,status,admin_note,requested_at,reviewed_at,paid_at FROM withdrawals WHERE user_id=? ORDER BY requested_at DESC LIMIT 100").bind(me.id).all<any>();
@@ -170,19 +207,21 @@ if(path==="/api/admin/dashboard"&&req.method==="GET"){
   }
  }
  const page=Math.max(1,Math.min(1000,Number(url.searchParams.get("page")||1))),limit=50,offset=(page-1)*limit;
- const [summary,users,payments,withdrawals,referrals]=await Promise.all([
+ const [summary,users,payments,withdrawals,referrals,earlyWithdrawals]=await Promise.all([
   env.DB.prepare("SELECT COUNT(*) AS total_users,COALESCE(SUM(activated),0) AS activated_users,COALESCE(SUM(mining_balance_sats),0) AS hash_rewards_sats,COALESCE(SUM(referral_balance_cents),0) AS referral_cents FROM users").first<any>(),
-  env.DB.prepare("SELECT id,email,display_name,activated,status,referral_code,mining_balance_sats,referral_balance_cents,created_at,activated_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>(),
+  env.DB.prepare("SELECT id,email,display_name,activated,status,block_reason,blocked_at,referral_code,mining_balance_sats,referral_balance_cents,created_at,activated_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>(),
   env.DB.prepare("SELECT p.reference,p.user_id,u.email,p.amount_minor,p.currency,p.phone_number,p.status,p.created_at,p.paid_at FROM payments p JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>(),
   env.DB.prepare("SELECT w.id,w.user_id,w.asset,w.amount_sats,w.amount_cents,w.destination,w.network,w.status,w.requested_at,u.email FROM withdrawals w JOIN users u ON u.id=w.user_id ORDER BY w.requested_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>(),
-  env.DB.prepare("SELECT r.id,r.referral_code,r.status,r.reward_cents,r.created_at,r.rewarded_at,referrer.email AS referrer_email,referred.email AS referred_email FROM referrals r JOIN users referrer ON referrer.id=r.referrer_user_id JOIN users referred ON referred.id=r.referred_user_id ORDER BY r.created_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>()
+  env.DB.prepare("SELECT r.id,r.referral_code,r.status,r.reward_cents,r.created_at,r.rewarded_at,referrer.email AS referrer_email,referred.email AS referred_email FROM referrals r JOIN users referrer ON referrer.id=r.referrer_user_id JOIN users referred ON referred.id=r.referred_user_id ORDER BY r.created_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>(),
+  env.DB.prepare("SELECT e.id,e.user_id,e.reason,e.payment_method,e.destination,e.document_name,e.document_mime,e.document_size,e.status,e.admin_reason,e.withdrawal_id,e.requested_at,e.reviewed_at,u.email,u.display_name FROM early_withdrawal_requests e JOIN users u ON u.id=e.user_id ORDER BY e.requested_at DESC LIMIT ? OFFSET ?").bind(limit,offset).all<any>()
  ]);
- return json({summary,users:users.results,payments:payments.results,withdrawals:withdrawals.results,referrals:referrals.results,payment_flags:paymentFlags,page,page_size:limit});
+ return json({summary,users:users.results,payments:payments.results,withdrawals:withdrawals.results,referrals:referrals.results,early_withdrawals:earlyWithdrawals.results,payment_flags:paymentFlags,page,page_size:limit});
 }
 if(path==="/api/admin/users/action"&&req.method==="POST"){
  if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
  const body=await req.json<any>(),userId=String(body.id||""),action=String(body.action||"");
- if(!userId||!["activate","suspend","restore"].includes(action))return json({error:"Invalid account action."},400);
+ if(!userId||!["activate","suspend","restore","block"].includes(action))return json({error:"Invalid account action."},400);
+ if(action==="block"){const reason=String(body.reason||"").trim();if(userId===me.id)return json({error:"You cannot block the administrator account currently in use."},400);if(reason.length<5||reason.length>500)return json({error:"A clear reason of 5 to 500 characters is required to block an account."},400);const r=await env.DB.prepare("UPDATE users SET status='suspended',block_reason=?,blocked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(reason,userId).run();if(!r.meta.changes)return json({error:"Account not found."},404);return json({message:"Account blocked. The user will be signed out and blocked from platform requests.",user_id:userId,action});}
  if(action==="activate"){
   const payment=await env.DB.prepare("SELECT reference,paystack_transaction_id FROM payments WHERE user_id=? AND status='success' AND amount_minor=10000 AND currency='KES' ORDER BY paid_at DESC LIMIT 1").bind(userId).first<any>();
   if(!payment)return json({error:"This account cannot be activated until a successful KSh 100 payment is verified."},409);
@@ -197,6 +236,23 @@ if(path==="/api/admin/users/action"&&req.method==="POST"){
   if(!r.meta.changes)return json({error:"Only suspended accounts can be restored."},409);
  }
  return json({message:"Account status updated.",user_id:userId,action});
+}
+if(path==="/api/admin/early-withdrawals/action"&&req.method==="POST"){
+ if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
+ const body=await req.json<any>(),requestId=String(body.id||""),action=String(body.action||""),reason=String(body.reason||"").trim();
+ if(!requestId||!["accept","decline"].includes(action))return json({error:"Invalid early withdrawal review action."},400);
+ if(reason.length<3||reason.length>1000)return json({error:"A review reason of 3 to 1,000 characters is required."},400);
+ const request=await env.DB.prepare("SELECT * FROM early_withdrawal_requests WHERE id=? AND status='pending'").bind(requestId).first<any>();
+ if(!request)return json({error:"Only pending early withdrawal requests can be reviewed."},409);
+ if(action==="decline"){
+  await env.DB.prepare("UPDATE early_withdrawal_requests SET status='declined',admin_reason=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'").bind(reason,requestId).run();
+  return json({message:"Early withdrawal request declined and the reason saved.",request_id:requestId});
+ }
+ const withdrawalId=id();
+ const inserted=await env.DB.prepare("INSERT INTO withdrawals(id,user_id,asset,amount_sats,amount_cents,destination,network,status,admin_note,reviewed_at) SELECT ?,u.id,'BTC',u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0),0,?,?, 'approved',?,CURRENT_TIMESTAMP FROM users u WHERE u.id=? AND u.activated=1 AND u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0)>0").bind(withdrawalId,request.destination,request.payment_method,reason,request.user_id).run();
+ if(!inserted.meta.changes)return json({error:"This user has no unreserved HASH balance available for an early payout request."},409);
+ await env.DB.prepare("UPDATE early_withdrawal_requests SET status='accepted',admin_reason=?,withdrawal_id=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'").bind(reason,withdrawalId,requestId).run();
+ return json({message:"Early withdrawal request accepted. A manual payout record has been created; payment is not automatic.",request_id:requestId,withdrawal_id:withdrawalId});
 }
 if(path==="/api/admin/withdrawals/action"&&req.method==="POST"){
  if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
