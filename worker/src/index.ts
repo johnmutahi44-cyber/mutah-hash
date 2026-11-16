@@ -20,7 +20,7 @@ async function activate(env:Env,reference:string,transactionId:string){
  if(!p)throw new Error("Payment reference not found");
  if(p.amount_minor!==10000||p.currency!=="KES")throw new Error("Payment amount or currency mismatch");
  await env.DB.batch([
-  env.DB.prepare("UPDATE payments SET status='success',paystack_transaction_id=?,paid_at=COALESCE(paid_at,CURRENT_TIMESTAMP),verified_at=CURRENT_TIMESTAMP WHERE reference=? AND status='pending' AND amount_minor=10000 AND currency='KES'").bind(transactionId,reference),
+  env.DB.prepare("UPDATE payments SET status='success',paystack_transaction_id=?,paid_at=COALESCE(paid_at,CURRENT_TIMESTAMP),verified_at=CURRENT_TIMESTAMP WHERE reference=? AND status IN ('pending','failed','abandoned') AND amount_minor=10000 AND currency='KES'").bind(transactionId,reference),
   env.DB.prepare("UPDATE users SET activated=1,activated_at=COALESCE(activated_at,CURRENT_TIMESTAMP),status='active',updated_at=CURRENT_TIMESTAMP WHERE id=? AND EXISTS(SELECT 1 FROM payments WHERE reference=? AND status='success')").bind(p.user_id,reference),
   env.DB.prepare("UPDATE referrals SET status='qualified',activation_reference=? WHERE referred_user_id=? AND status='pending_activation' AND EXISTS(SELECT 1 FROM payments WHERE reference=? AND status='success')").bind(reference,p.user_id,reference)
  ]);
@@ -54,7 +54,7 @@ if(path==="/api/payment/status"&&req.method==="GET"){
  if(!reference)return json({error:"Payment reference is required."},400);
  const payment=await env.DB.prepare("SELECT * FROM payments WHERE reference=? AND user_id=?").bind(reference,me.id).first<any>();
  if(!payment)return json({error:"Payment record not found for this account."},404);
- if(payment.status!=="pending")return json({status:payment.status,activated:!!me.activated,message:payment.status==="success"?"Payment successful. Your account is activated.":payment.status==="abandoned"?"Payment was cancelled or abandoned. No payment was received. You can try again.":payment.status==="failed"?"Payment failed. No activation was granted. You can try again.":"Payment status: "+payment.status});
+ if(payment.status==="success")return json({status:payment.status,activated:!!me.activated,message:"Payment successful. Your account is activated."});
  const vr=await fetch("https://api.paystack.co/transaction/verify/"+encodeURIComponent(reference),{headers:{Authorization:"Bearer "+env.PAYSTACK_SECRET_KEY}});
  const verified=await vr.json() as any;
  if(vr.ok&&verified.status&&verified.data?.status==="success"){
@@ -65,7 +65,7 @@ if(path==="/api/payment/status"&&req.method==="GET"){
  const providerStatus=String(verified.data?.status||"").toLowerCase();
  if(vr.ok&&verified.status&&["failed","abandoned"].includes(providerStatus)){
   const status=providerStatus==="abandoned"?"abandoned":"failed";
-  await env.DB.prepare("UPDATE payments SET status=? WHERE reference=? AND user_id=? AND status='pending'").bind(status,reference,me.id).run();
+  await env.DB.prepare("UPDATE payments SET status=? WHERE reference=? AND user_id=? AND status IN ('pending','failed','abandoned')").bind(status,reference,me.id).run();
   return json({status,activated:false,message:status==="abandoned"?"Payment was cancelled or abandoned. No payment was received. You can try again.":"Payment failed. No activation was granted. You can try again."});
  }
  return json({status:"pending",activated:false,message:"Waiting for M-Pesa/Paystack confirmation. Your account has not been activated yet."});
@@ -118,7 +118,7 @@ if(path==="/api/withdrawals"&&req.method==="POST"){
 }
 if(path==="/api/admin/dashboard"&&req.method==="GET"){
  if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
- const pending=await env.DB.prepare("SELECT reference,user_id,amount_minor,currency FROM payments WHERE status='pending' ORDER BY created_at ASC LIMIT 10").all<any>();
+ const pending=await env.DB.prepare("SELECT reference,user_id,amount_minor,currency FROM payments WHERE status IN ('pending','failed','abandoned') ORDER BY created_at DESC LIMIT 50").all<any>();
  const paymentFlags:any[]=[];
  for(const p of pending.results){
   const vr=await fetch("https://api.paystack.co/transaction/verify/"+encodeURIComponent(p.reference),{headers:{Authorization:"Bearer "+env.PAYSTACK_SECRET_KEY}});
@@ -128,7 +128,7 @@ if(path==="/api/admin/dashboard"&&req.method==="GET"){
    if(matches)await activate(env,p.reference,String(verified.data.id));
    else paymentFlags.push({reference:p.reference,user_id:p.user_id,reason:"Successful Paystack transaction does not match the expected KSh 100 activation details."});
   }else if(vr.ok&&verified.status&&["failed","abandoned"].includes(String(verified.data?.status))){
-   await env.DB.prepare("UPDATE payments SET status=? WHERE reference=? AND status='pending'").bind(verified.data.status==="abandoned"?"abandoned":"failed",p.reference).run();
+   await env.DB.prepare("UPDATE payments SET status=? WHERE reference=? AND status IN ('pending','failed','abandoned')").bind(verified.data.status==="abandoned"?"abandoned":"failed",p.reference).run();
   }
  }
  const page=Math.max(1,Math.min(1000,Number(url.searchParams.get("page")||1))),limit=50,offset=(page-1)*limit;
