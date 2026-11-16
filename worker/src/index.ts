@@ -94,9 +94,12 @@ if(path==="/api/payment/initiate"&&req.method==="POST"){if(me.activated)return j
 if(path==="/api/hash/start"&&req.method==="POST"){
  const now=Date.now();
  if(!me.activated)return json({error:"Activate your account first."},403);
- if(!me.last_hash_at){
+ {
+  // Enforce the one-successful-paid-referral requirement for every account,
+  // including older accounts with previous HASH activity. Once qualified,
+  // the referral remains valid for all future AIRDROP sessions.
   const qualified=await env.DB.prepare("SELECT COUNT(*) AS count FROM referrals r JOIN users u ON u.id=r.referred_user_id WHERE r.referrer_user_id=? AND r.status IN ('qualified','rewarded') AND u.activated=1").bind(me.id).first<any>();
-  if(Number(qualified?.count||0)<1)return json({error:"Before your first AIRDROP, share your referral link with someone who registers and completes their own verified KSh 100 activation. You can invite as many people as you like; only one successful paid referral is required."},403);
+  if(Number(qualified?.count||0)<1)return json({error:"Before starting AIRDROP, share your referral link with someone who registers and completes their own verified KSh 100 activation. You can invite as many people as you like; only one successful paid referral is required. Once qualified, you will not need to refer again."},403);
  }
  await resetInactiveBalance(env,me);
  const fresh=await user(env,who.uid);
