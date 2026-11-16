@@ -39,8 +39,9 @@ async function activate(env:Env,reference:string,transactionId:string){
  if(!p)throw new Error("Payment reference not found");
  if(p.amount_minor!==10000||p.currency!=="KES")throw new Error("Payment amount or currency mismatch");
  await env.DB.batch([
-  env.DB.prepare("UPDATE payments SET status='success',paystack_transaction_id=?,paid_at=COALESCE(paid_at,CURRENT_TIMESTAMP),verified_at=CURRENT_TIMESTAMP WHERE reference=? AND status IN ('pending','failed','abandoned') AND amount_minor=10000 AND currency='KES'").bind(transactionId,reference),
+  env.DB.prepare("UPDATE payments SET status='success',paystack_transaction_id=COALESCE(paystack_transaction_id,?),paid_at=COALESCE(paid_at,CURRENT_TIMESTAMP),verified_at=CURRENT_TIMESTAMP WHERE reference=? AND status IN ('pending','failed','abandoned','success') AND amount_minor=10000 AND currency='KES'").bind(transactionId,reference),
   env.DB.prepare("UPDATE users SET activated=1,activated_at=COALESCE(activated_at,CURRENT_TIMESTAMP),status='active',updated_at=CURRENT_TIMESTAMP WHERE id=? AND EXISTS(SELECT 1 FROM payments WHERE reference=? AND status='success')").bind(p.user_id,reference),
+  env.DB.prepare("INSERT OR IGNORE INTO referrals(id,referrer_user_id,referred_user_id,referral_code,status,reward_cents) SELECT lower(hex(randomblob(16))),u.referred_by_user_id,u.id,ref.referral_code,'pending_activation',700 FROM users u JOIN users ref ON ref.id=u.referred_by_user_id WHERE u.id=? AND u.referred_by_user_id IS NOT NULL AND EXISTS(SELECT 1 FROM payments WHERE reference=? AND status='success')").bind(p.user_id,reference),
   env.DB.prepare("UPDATE referrals SET status='rewarded',activation_reference=? WHERE referred_user_id=? AND status='pending_activation' AND EXISTS(SELECT 1 FROM payments WHERE reference=? AND status='success')").bind(reference,p.user_id,reference)
  ]);
 }
@@ -73,7 +74,7 @@ if(path==="/api/payment/status"&&req.method==="GET"){
  if(!reference)return json({error:"Payment reference is required."},400);
  const payment=await env.DB.prepare("SELECT * FROM payments WHERE reference=? AND user_id=?").bind(reference,me.id).first<any>();
  if(!payment)return json({error:"Payment record not found for this account."},404);
- if(payment.status==="success")return json({status:payment.status,activated:!!me.activated,message:"Payment successful. Your account is activated."});
+ if(payment.status==="success"){await activate(env,reference,String(payment.paystack_transaction_id||"PAYSTACK-VERIFIED"));const latest=await user(env,who.uid);return json({status:"success",activated:!!latest?.activated,message:latest?.activated?"Payment successful. Your account is activated.":"Payment is verified; account activation is being completed. Refresh shortly."});}
  const vr=await fetch("https://api.paystack.co/transaction/verify/"+encodeURIComponent(reference),{headers:{Authorization:"Bearer "+env.PAYSTACK_SECRET_KEY}});
  const verified=await vr.json() as any;
  if(vr.ok&&verified.status&&verified.data?.status==="success"){
