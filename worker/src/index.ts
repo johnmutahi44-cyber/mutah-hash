@@ -192,4 +192,15 @@ if(path==="/api/admin/withdrawals/action"&&req.method==="POST"){
 }
 return json({error:"Not found or not authorized."},404);
 }catch(e){return json({error:e instanceof Error?e.message:"Unexpected server error"},401);}}
-export default{fetch:handle};
+export default{
+ fetch:handle,
+ scheduled(_controller:ScheduledController,env:Env,ctx:ExecutionContext){
+  ctx.waitUntil((async()=>{
+   const active=await env.DB.prepare("SELECT * FROM users WHERE session_active=1 AND session_started_at IS NOT NULL").all<any>();
+   const rows=active.results||[];
+   for(let i=0;i<rows.length;i+=50){
+    await Promise.allSettled(rows.slice(i,i+50).map(me=>accrueHashSession(env,me)));
+   }
+  })());
+ }
+};
