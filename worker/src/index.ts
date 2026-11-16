@@ -38,7 +38,7 @@ async function accrueHashSession(env:Env,me:any){
  // start later receive only the proportional amount for time until midnight.
  const target=Math.floor(elapsed*HASH_SESSION_REWARD_SATS/86400000);
  const finished=now>=ends;
- if(target<=credited&&!finished)return;
+ if(target<=credited&&!finished){await env.DB.prepare("UPDATE users SET session_ends_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND session_active=1 AND session_started_at=?").bind(new Date(ends).toISOString(),me.id,me.session_started_at).run();return;}
  const delta=Math.max(0,target-credited);
  const updated=await env.DB.prepare("UPDATE users SET mining_balance_sats=mining_balance_sats+?,session_credited_sats=?,session_active=CASE WHEN ?=1 THEN 0 ELSE 1 END,session_ends_at=CASE WHEN ?=1 THEN NULL ELSE ? END,session_started_at=CASE WHEN ?=1 THEN NULL ELSE session_started_at END,last_hash_at=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE last_hash_at END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND session_active=1 AND session_credited_sats=? AND session_started_at=?").bind(delta,target,finished?1:0,finished?1:0,new Date(ends).toISOString(),finished?1:0,finished?1:0,me.id,credited,me.session_started_at).run();
  if(updated.meta.changes&&delta>0){
