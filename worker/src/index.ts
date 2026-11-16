@@ -150,6 +150,7 @@ if(path==="/api/early-withdrawals"&&req.method==="POST"){
   if(!/^254[17]\d{8}$/.test(digits))return json({error:"Enter a valid Kenyan mobile-money number."},400);
   destination=digits;
  }else if(!["BSC","SEGWITBTC","BTC","ETH"].includes(paymentMethod))return json({error:"Choose M-Pesa, Airtel Money or a supported crypto network."},400);
+ const existing=await env.DB.prepare("SELECT id FROM early_withdrawal_requests WHERE user_id=? AND status='pending' LIMIT 1").bind(me.id).first<any>();if(existing)return json({error:"You already have an early withdrawal request awaiting review."},409);
  const requestId=id();
  await env.DB.prepare("INSERT INTO early_withdrawal_requests(id,user_id,reason,payment_method,destination,document_name,document_mime,document_size,document_blob,status) VALUES(?,?,?,?,?,?,?,?,?,'pending')").bind(requestId,me.id,reason,paymentMethod,destination,documentName,documentMime,bytes.length,bytes).run();
  return json({message:"Your early withdrawal exception request and supporting document have been submitted for admin review. This is not approval or a payout.",request_id:requestId});
@@ -232,7 +233,7 @@ if(path==="/api/admin/users/action"&&req.method==="POST"){
   if(!r.meta.changes)return json({error:"Account not found."},404);
  }
  if(action==="restore"){
-  const r=await env.DB.prepare("UPDATE users SET status=CASE WHEN activated=1 THEN 'active' ELSE 'pending' END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='suspended'").bind(userId).run();
+  const r=await env.DB.prepare("UPDATE users SET status=CASE WHEN activated=1 THEN 'active' ELSE 'pending' END,block_reason=NULL,blocked_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='suspended'").bind(userId).run();
   if(!r.meta.changes)return json({error:"Only suspended accounts can be restored."},409);
  }
  return json({message:"Account status updated.",user_id:userId,action});
