@@ -129,14 +129,20 @@ if(path==="/api/withdrawals"&&req.method==="GET"){
  return json({withdrawals:rows.results});
 }
 if(path==="/api/withdrawals"&&req.method==="POST"){
- const body=await req.json<any>(),asset=body.asset==="BTC"?"BTC":null,destination=String(body.destination||"").trim(),network=asset==="BTC"?String(body.network||""):"";
+ const body=await req.json<any>(),asset=body.asset==="BTC"?"BTC":null,destinationRaw=String(body.destination||"").trim(),network=asset==="BTC"?String(body.network||""):"";
  if(!asset)return json({error:"Choose a valid reward balance."},400);
- if(!destination||destination.length>200)return json({error:"Enter valid payout destination details."},400);
- if(asset==="BTC"&&!["BSC","SEGWITBTC","BTC","ETH"].includes(network))return json({error:"Choose an available withdrawal network. Lightning Network is currently suspended."},400);
- if(asset==="BTC"&&!me.activated)return json({error:"Activate your account before requesting a HASH withdrawal."},403);
- const eligibility=await env.DB.prepare("SELECT activated_at,datetime(activated_at,'+5 months') AS eligible_at,datetime('now')>=datetime(activated_at,'+5 months') AS eligible FROM users WHERE id=?").bind(me.id).first<any>();
- if(!eligibility?.activated_at)return json({error:"Your five-month withdrawal waiting period starts after account activation."},403);
- if(!eligibility.eligible)return json({error:"Withdrawals become available five months after activation: "+eligibility.eligible_at+" UTC."},403);
+ if(!destinationRaw||destinationRaw.length>200)return json({error:"Enter valid payout destination details."},400);
+ if(!asset||!me.activated)return json({error:"Activate your account before requesting a HASH withdrawal."},403);
+ let destination=destinationRaw;
+ if(network==="MPESA"||network==="AIRTEL"){
+  let digits=destination.replace(/\\D/g,"");
+  if(digits.length===10&&digits.startsWith("0"))digits="254"+digits.slice(1);
+  if(digits.length===9&&(digits.startsWith("7")||digits.startsWith("1")))digits="254"+digits;
+  if(!/^254[17]\\d{8}$/.test(digits))return json({error:"Enter a valid Kenyan mobile-money number, for example 0712345678 or 254712345678."},400);
+  destination=digits;
+ }else if(!["BSC","SEGWITBTC","BTC","ETH"].includes(network)){
+  return json({error:"Choose M-Pesa, Airtel Money, or one of the supported crypto networks: BSC (BEP20), BTC, BTC SegWit, or ETH (ERC20)."},400);
+ }
  const requestId=id();
  const result=await env.DB.prepare("INSERT INTO withdrawals(id,user_id,asset,amount_sats,amount_cents,destination,network,status) SELECT ?,u.id,?,CASE WHEN ?='BTC' THEN u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0) ELSE 0 END,CASE WHEN ?='USD' THEN u.referral_balance_cents-COALESCE((SELECT SUM(amount_cents) FROM withdrawals WHERE user_id=u.id AND asset='USD' AND status IN ('pending','approved')),0) ELSE 0 END,?,?, 'pending' FROM users u WHERE u.id=? AND (CASE WHEN ?='BTC' THEN u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0) ELSE u.referral_balance_cents-COALESCE((SELECT SUM(amount_cents) FROM withdrawals WHERE user_id=u.id AND asset='USD' AND status IN ('pending','approved')),0) END)>0").bind(requestId,asset,asset,asset,destination,network||null,me.id,asset).run();
  if(!result.meta.changes)return json({error:"There is no unreserved balance available for this withdrawal."},400);
