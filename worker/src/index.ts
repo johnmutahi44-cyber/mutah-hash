@@ -17,21 +17,33 @@ async function resetInactiveBalance(env:Env,me:any){
  }
 }
 const HASH_SESSION_REWARD_SATS=15000;
-const HASH_SESSION_INTERVALS=288;
+const HASH_SESSION_INTERVAL_MS=300000;
+// Kenya uses East Africa Time (UTC+3) year-round. Every AIRDROP session ends
+// at the next midnight in Kenya, regardless of when the user starts it.
+function nextKenyaMidnight(timestamp:number){
+ const kenyaNow=new Date(timestamp+3*60*60*1000);
+ const midnightUtc=Date.UTC(kenyaNow.getUTCFullYear(),kenyaNow.getUTCMonth(),kenyaNow.getUTCDate()+1);
+ return midnightUtc-3*60*60*1000;
+}
 async function accrueHashSession(env:Env,me:any){
  if(!me.session_active||!me.session_started_at)return;
  const started=Date.parse(me.session_started_at);
  if(!Number.isFinite(started))return;
- const intervals=Math.min(HASH_SESSION_INTERVALS,Math.floor((Date.now()-started)/300000));
+ const ends=nextKenyaMidnight(started);
+ const now=Date.now();
+ const effectiveNow=Math.min(now,ends);
+ const elapsed=Math.max(0,effectiveNow-started);
  const credited=Number(me.session_credited_sats||0);
- if(intervals<=0)return;
- const target=intervals===HASH_SESSION_INTERVALS?HASH_SESSION_REWARD_SATS:Math.floor(intervals*HASH_SESSION_REWARD_SATS/HASH_SESSION_INTERVALS);
- if(target<=credited)return;
- const delta=target-credited;
- const updated=await env.DB.prepare("UPDATE users SET mining_balance_sats=mining_balance_sats+?,session_credited_sats=?,session_active=CASE WHEN ?=288 THEN 0 ELSE 1 END,session_ends_at=CASE WHEN ?=288 THEN NULL ELSE session_ends_at END,session_started_at=CASE WHEN ?=288 THEN NULL ELSE session_started_at END,last_hash_at=CASE WHEN ?=288 THEN CURRENT_TIMESTAMP ELSE last_hash_at END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND session_active=1 AND session_credited_sats=? AND session_started_at=?").bind(delta,target,intervals,intervals,intervals,intervals,me.id,credited,me.session_started_at).run();
- if(updated.meta.changes){
-  const ref="HASH-SESSION-"+me.id+"-"+started+"-"+intervals;
-  await env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) VALUES(?,?, 'hash_reward',?,'completed',?,'Five-minute AIRDROP session reward increment')").bind(id(),me.id,delta,ref).run();
+ // Keep the existing 15,000-satoshi-equivalent-per-24-hours rate. Users who
+ // start later receive only the proportional amount for time until midnight.
+ const target=Math.floor(elapsed*HASH_SESSION_REWARD_SATS/86400000);
+ const finished=now>=ends;
+ if(target<=credited&&!finished)return;
+ const delta=Math.max(0,target-credited);
+ const updated=await env.DB.prepare("UPDATE users SET mining_balance_sats=mining_balance_sats+?,session_credited_sats=?,session_active=CASE WHEN ?=1 THEN 0 ELSE 1 END,session_ends_at=CASE WHEN ?=1 THEN NULL ELSE ? END,session_started_at=CASE WHEN ?=1 THEN NULL ELSE session_started_at END,last_hash_at=CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE last_hash_at END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND session_active=1 AND session_credited_sats=? AND session_started_at=?").bind(delta,target,finished?1:0,finished?1:0,new Date(ends).toISOString(),finished?1:0,finished?1:0,me.id,credited,me.session_started_at).run();
+ if(updated.meta.changes&&delta>0){
+  const ref="HASH-SESSION-"+me.id+"-"+started+"-"+Math.floor(effectiveNow/HASH_SESSION_INTERVAL_MS);
+  await env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) VALUES(?,?, 'hash_reward',?,'completed',?,'Proportional AIRDROP reward accrued until Kenya midnight')").bind(id(),me.id,delta,ref).run();
  }
 }
 async function activate(env:Env,reference:string,transactionId:string){
@@ -104,13 +116,13 @@ if(path==="/api/hash/start"&&req.method==="POST"){
  await resetInactiveBalance(env,me);
  const fresh=await user(env,who.uid);
  if(fresh.session_active)return json({error:fresh.session_ends_at&&Date.parse(fresh.session_ends_at)<=now?"Your 24-hour session is complete. Claim its reward before starting another.":"Your 24-hour session is already active."},409);
- const end=new Date(now+24*3600000).toISOString(),start=new Date(now).toISOString();
+ const start=new Date(now).toISOString(),end=new Date(nextKenyaMidnight(now)).toISOString();
  const started=await env.DB.prepare("UPDATE users SET session_active=1,session_started_at=?,session_ends_at=?,session_credited_sats=0,updated_at=CURRENT_TIMESTAMP WHERE id=? AND session_active=0").bind(start,end,me.id).run();
- if(!started.meta.changes)return json({error:"A HASH session is already active. Refresh and check its status."},409);
- return json({message:"AIRDROP started. 0.00015000 BTC-denominated programme units will be credited progressively over 24 hours.",session_started_at:start,session_ends_at:end,reward_sats:15000});
+ if(!started.meta.changes)return json({error:"AIRDROP is already active. Refresh and check its status."},409);
+ return json({message:"AIRDROP started.",session_started_at:start,session_ends_at:end});
 }
 if(path==="/api/hash/claim"&&req.method==="POST"){
- return json({error:"AIRDROP rewards are credited automatically every five minutes during an active 24-hour session. Refresh your dashboard to see the latest balance."},409);
+ return json({error:"There is no separate AIRDROP claim while a session is active. Start a new AIRDROP after the current session ends."},409);
 }
 if(path==="/api/withdrawals"&&req.method==="GET"){
  const rows=await env.DB.prepare("SELECT id,asset,amount_sats,amount_cents,destination,network,status,admin_note,requested_at,reviewed_at,paid_at FROM withdrawals WHERE user_id=? ORDER BY requested_at DESC LIMIT 100").bind(me.id).all<any>();
