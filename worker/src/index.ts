@@ -133,6 +133,12 @@ if(path==="/api/withdrawals"&&req.method==="POST"){
  if(!asset)return json({error:"Choose a valid reward balance."},400);
  if(!destinationRaw||destinationRaw.length>200)return json({error:"Enter valid payout destination details."},400);
  if(!asset||!me.activated)return json({error:"Activate your account before requesting a HASH withdrawal."},403);
+ const activationRaw=me.activated_at?String(me.activated_at):"";
+ const activationDate=activationRaw?new Date(activationRaw.includes("T")?activationRaw:activationRaw.replace(" ","T")+"Z"):null;
+ if(!activationDate||Number.isNaN(activationDate.getTime()))return json({error:"Your verified activation date is unavailable. Please contact support before requesting a withdrawal."},403);
+ const withdrawalOpensAt=new Date(activationDate);
+ withdrawalOpensAt.setMonth(withdrawalOpensAt.getMonth()+5);
+ if(Date.now()<withdrawalOpensAt.getTime())return json({error:"Withdrawal requests open five calendar months after your account activation date ("+withdrawalOpensAt.toISOString().slice(0,10)+")."},403);
  let destination=destinationRaw;
  if(network==="MPESA"||network==="AIRTEL"){
   let digits=destination.replace(/\\D/g,"");
