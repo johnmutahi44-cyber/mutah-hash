@@ -1,4 +1,4 @@
-const CACHE_NAME = "mutah-hash-shell-v2";
+const CACHE_NAME = "mutah-hash-shell-v3";
 const SHELL = ["/", "/manifest.webmanifest", "/favicon.svg", "/icon-192.svg", "/icon-512.svg", "/icon-maskable.svg"];
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(SHELL)));
