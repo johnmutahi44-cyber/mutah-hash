@@ -221,7 +221,25 @@ if(path==="/api/admin/dashboard"&&req.method==="GET"){
 if(path==="/api/admin/users/action"&&req.method==="POST"){
  if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
  const body=await req.json<any>(),userId=String(body.id||""),action=String(body.action||"");
- if(!userId||!["activate","suspend","restore","block"].includes(action))return json({error:"Invalid account action."},400);
+ if(!userId||!["activate","suspend","restore","block","delete"].includes(action))return json({error:"Invalid account action."},400);
+ if(action==="delete"){
+  if(userId===me.id)return json({error:"You cannot delete the administrator account currently in use."},400);
+  const target=await env.DB.prepare("SELECT id FROM users WHERE id=?").bind(userId).first<any>();
+  if(!target)return json({error:"Account not found."},404);
+  // Remove dependent rows first so foreign-key constraints remain satisfied.
+  await env.DB.batch([
+   env.DB.prepare("UPDATE users SET referred_by_user_id=NULL WHERE referred_by_user_id=?").bind(userId),
+   env.DB.prepare("DELETE FROM referrals WHERE referrer_user_id=? OR referred_user_id=?").bind(userId,userId),
+   env.DB.prepare("DELETE FROM early_withdrawal_requests WHERE user_id=?").bind(userId),
+   env.DB.prepare("DELETE FROM withdrawals WHERE user_id=?").bind(userId),
+   env.DB.prepare("DELETE FROM ledger WHERE user_id=?").bind(userId),
+   env.DB.prepare("DELETE FROM payments WHERE user_id=?").bind(userId),
+   env.DB.prepare("DELETE FROM policy_consents WHERE user_id=?").bind(userId),
+   env.DB.prepare("DELETE FROM referral_codes WHERE owner_user_id=?").bind(userId),
+   env.DB.prepare("DELETE FROM users WHERE id=?").bind(userId)
+  ]);
+  return json({message:"Account and all associated Mutah Hash database records permanently deleted.",user_id:userId,action});
+ }
  if(action==="block"){const reason=String(body.reason||"").trim();if(userId===me.id)return json({error:"You cannot block the administrator account currently in use."},400);if(reason.length<5||reason.length>500)return json({error:"A clear reason of 5 to 500 characters is required to block an account."},400);const r=await env.DB.prepare("UPDATE users SET status='suspended',block_reason=?,blocked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(reason,userId).run();if(!r.meta.changes)return json({error:"Account not found."},404);return json({message:"Account blocked. The user will be signed out and blocked from platform requests.",user_id:userId,action});}
  if(action==="activate"){
   const payment=await env.DB.prepare("SELECT reference,paystack_transaction_id FROM payments WHERE user_id=? AND status='success' AND amount_minor=10000 AND currency='KES' ORDER BY paid_at DESC LIMIT 1").bind(userId).first<any>();
