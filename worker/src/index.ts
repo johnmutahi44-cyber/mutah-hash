@@ -15,6 +15,24 @@ async function resetInactiveBalance(env:Env,me:any){
   await env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) VALUES(?,?, 'inactivity_reset',?,'completed',?,'Unreserved HASH rewards reset after 72 consecutive hours without a successful HASH claim')").bind(id(),me.id,-resetAmount,resetRef).run();
  }
 }
+const HASH_SESSION_REWARD_SATS=15000;
+const HASH_SESSION_INTERVALS=288;
+async function accrueHashSession(env:Env,me:any){
+ if(!me.session_active||!me.session_started_at)return;
+ const started=Date.parse(me.session_started_at);
+ if(!Number.isFinite(started))return;
+ const intervals=Math.min(HASH_SESSION_INTERVALS,Math.floor((Date.now()-started)/300000));
+ const credited=Number(me.session_credited_sats||0);
+ if(intervals<=0)return;
+ const target=intervals===HASH_SESSION_INTERVALS?HASH_SESSION_REWARD_SATS:Math.floor(intervals*HASH_SESSION_REWARD_SATS/HASH_SESSION_INTERVALS);
+ if(target<=credited)return;
+ const delta=target-credited;
+ const updated=await env.DB.prepare("UPDATE users SET mining_balance_sats=mining_balance_sats+?,session_credited_sats=?,session_active=CASE WHEN ?=288 THEN 0 ELSE 1 END,session_ends_at=CASE WHEN ?=288 THEN NULL ELSE session_ends_at END,session_started_at=CASE WHEN ?=288 THEN NULL ELSE session_started_at END,last_hash_at=CASE WHEN ?=288 THEN CURRENT_TIMESTAMP ELSE last_hash_at END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND session_active=1 AND session_credited_sats=? AND session_started_at=?").bind(delta,target,intervals,intervals,intervals,intervals,me.id,credited,me.session_started_at).run();
+ if(updated.meta.changes){
+  const ref="HASH-SESSION-"+me.id+"-"+started+"-"+intervals;
+  await env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) VALUES(?,?, 'hash_reward',?,'completed',?,'Five-minute AIRDROP session reward increment')").bind(id(),me.id,delta,ref).run();
+ }
+}
 async function activate(env:Env,reference:string,transactionId:string){
  const p=await env.DB.prepare("SELECT * FROM payments WHERE reference=?").bind(reference).first<any>();
  if(!p)throw new Error("Payment reference not found");
@@ -47,7 +65,7 @@ if(path==="/api/paystack/webhook"&&req.method==="POST"){
 }
 try{const who=await identity(req,env);
 if(path==="/api/register"&&req.method==="POST"){const body=await req.json<any>(),existing=await user(env,who.uid);if(existing)return json({profile:existing});if(body.guidelinesAccepted!==true)return json({error:"Registration blocked: you must accept the Mutah Hash App & Community Guidelines."},400);const version=String(body.guidelinesVersion||"");if(version!=="2026-11-15-v3")return json({error:"The guidelines version is outdated or invalid. Refresh the app and review the current guidelines before registering."},409);if(!String(body.displayName||"").trim())return json({error:"Enter your full name before registering."},400);const ref=String(body.referralCode||"").trim().toUpperCase();const referrer=ref?await env.DB.prepare("SELECT id FROM users WHERE referral_code=?").bind(ref).first<any>():null;if(ref&&!referrer)return json({error:"This referral link is invalid. Please reopen the referral link shared with you and register again."},400);const uid=id(),refcode=code();await env.DB.batch([env.DB.prepare("INSERT INTO users(id,firebase_uid,email,display_name,referral_code,referred_by_user_id) VALUES(?,?,?,?,?,?)").bind(uid,who.uid,who.email,String(body.displayName||who.name||"").slice(0,80),refcode,referrer?.id||null),env.DB.prepare("INSERT INTO policy_consents(user_id,guidelines_version,accepted_at) VALUES(?,?,CURRENT_TIMESTAMP)").bind(uid,version)]);if(referrer&&referrer.id!==uid)await env.DB.prepare("INSERT OR IGNORE INTO referrals(id,referrer_user_id,referred_user_id,referral_code,status,reward_cents) VALUES(?,?,?,?, 'pending_activation',700)").bind(id(),referrer.id,uid,ref).run();return json({profile:await user(env,who.uid)});}
-let me=await user(env,who.uid);if(!me)return json({error:"Account profile not found. Please register again."},404);if(me.status==="suspended"&&path!=="/api/me")return json({error:"This account is suspended. Contact Mutah Hash support for a review."},403);await resetInactiveBalance(env,me);me=await user(env,who.uid);
+let me=await user(env,who.uid);if(!me)return json({error:"Account profile not found. Please register again."},404);if(me.status==="suspended"&&path!=="/api/me")return json({error:"This account is suspended. Contact Mutah Hash support for a review."},403);await resetInactiveBalance(env,me);me=await user(env,who.uid);await accrueHashSession(env,me);me=await user(env,who.uid);
 if(path==="/api/me"){await resetInactiveBalance(env,me);await env.DB.prepare("INSERT OR IGNORE INTO referrals(id,referrer_user_id,referred_user_id,referral_code,status,reward_cents) SELECT lower(hex(randomblob(16))),u.referred_by_user_id,u.id,ref.referral_code,'pending_activation',700 FROM users u JOIN users ref ON ref.id=u.referred_by_user_id WHERE u.activated=0 AND NOT EXISTS(SELECT 1 FROM referrals r WHERE r.referred_user_id=u.id)").run();const profile=await user(env,who.uid);const qualified=await env.DB.prepare("SELECT COUNT(*) AS count FROM referrals r JOIN users u ON u.id=r.referred_user_id WHERE r.referrer_user_id=? AND r.status IN ('qualified','rewarded') AND u.activated=1").bind(me.id).first<any>();const referralStats=await env.DB.prepare("SELECT COUNT(*) AS total,COALESCE(SUM(CASE WHEN u.activated=0 THEN 1 ELSE 0 END),0) AS pending,COALESCE(SUM(CASE WHEN u.activated=1 THEN 1 ELSE 0 END),0) AS activated FROM users u WHERE u.referred_by_user_id=?").bind(me.id).first<any>();return json({profile,qualified_referrals:Number(qualified?.count||0),total_referrals:Number(referralStats?.total||0),pending_referrals:Number(referralStats?.pending||0),activated_referrals:Number(referralStats?.activated||0),required_referrals:1});}
 if(path==="/api/payment/status"&&req.method==="GET"){
  const reference=String(url.searchParams.get("reference")||"").trim();
@@ -81,22 +99,13 @@ if(path==="/api/hash/start"&&req.method==="POST"){
  await resetInactiveBalance(env,me);
  const fresh=await user(env,who.uid);
  if(fresh.session_active)return json({error:fresh.session_ends_at&&Date.parse(fresh.session_ends_at)<=now?"Your 24-hour session is complete. Claim its reward before starting another.":"Your 24-hour session is already active."},409);
- const end=new Date(now+24*3600000).toISOString();
- const started=await env.DB.prepare("UPDATE users SET session_active=1,session_ends_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND session_active=0").bind(end,me.id).run();
+ const end=new Date(now+24*3600000).toISOString(),start=new Date(now).toISOString();
+ const started=await env.DB.prepare("UPDATE users SET session_active=1,session_started_at=?,session_ends_at=?,session_credited_sats=0,updated_at=CURRENT_TIMESTAMP WHERE id=? AND session_active=0").bind(start,end,me.id).run();
  if(!started.meta.changes)return json({error:"A HASH session is already active. Refresh and check its status."},409);
- return json({message:"HASH session started. Return after the 24-hour session ends.",session_ends_at:end});
+ return json({message:"AIRDROP started. 0.00015000 BTC-denominated programme units will be credited progressively over 24 hours.",session_started_at:start,session_ends_at:end,reward_sats:15000});
 }
 if(path==="/api/hash/claim"&&req.method==="POST"){
- if(!me.activated)return json({error:"Activate your account first."},403);
- const now=Date.now(),end=me.session_ends_at?Date.parse(me.session_ends_at):0;
- if(!me.session_active||!end||now<end)return json({error:"Your 24-hour HASH session has not finished yet."},409);
- const claimRef="HASH-"+me.id+"-"+end;
- const results=await env.DB.batch([
-  env.DB.prepare("UPDATE users SET mining_balance_sats=mining_balance_sats+1500,session_active=0,last_hash_at=CURRENT_TIMESTAMP,session_ends_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND session_active=1 AND julianday(session_ends_at)<=julianday('now')").bind(me.id),
-  env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) SELECT ?,?,'hash_reward',1500,'completed',?,'HASH cycle reward' FROM users WHERE id=? AND session_active=0 AND last_hash_at>=datetime('now','-2 seconds')").bind(id(),me.id,claimRef,me.id)
- ]);
- if(!results[0].meta.changes)return json({error:"This HASH session was already claimed or has not finished."},409);
- return json({message:"0.000015 virtual BTC units credited. Any eventual payout is manual review."});
+ return json({error:"AIRDROP rewards are credited automatically every five minutes during an active 24-hour session. Refresh your dashboard to see the latest balance."},409);
 }
 if(path==="/api/withdrawals"&&req.method==="GET"){
  const rows=await env.DB.prepare("SELECT id,asset,amount_sats,amount_cents,destination,network,status,admin_note,requested_at,reviewed_at,paid_at FROM withdrawals WHERE user_id=? ORDER BY requested_at DESC LIMIT 100").bind(me.id).all<any>();
