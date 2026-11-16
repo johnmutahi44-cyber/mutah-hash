@@ -17,3 +17,6 @@ enabled = true
 
 [observability.traces]
 enabled = true
+
+[triggers]
+crons = ["*/1 * * * *"]
