@@ -5,6 +5,7 @@ async function identity(req:Request,env:Env){const h=req.headers.get("authorizat
 const id=()=>crypto.randomUUID();const code=()=>crypto.randomUUID().replace(/-/g,"").slice(0,10).toUpperCase();
 async function user(env:Env,uid:string){return env.DB.prepare("SELECT * FROM users WHERE firebase_uid=?").bind(uid).first<any>();}
 async function resetInactiveBalance(env:Env,me:any){
+ if(me.session_active)return;
  const anchor=me.last_hash_at||me.activated_at;
  if(!anchor||Date.now()-Date.parse(anchor)<=72*3600000)return;
  const reservedRow=await env.DB.prepare("SELECT COALESCE(SUM(amount_sats),0) AS reserved FROM withdrawals WHERE user_id=? AND asset='BTC' AND status IN ('pending','approved')").bind(me.id).first<any>();
