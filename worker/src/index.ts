@@ -250,10 +250,17 @@ if(path==="/api/admin/early-withdrawals/action"&&req.method==="POST"){
   return json({message:"Early withdrawal request declined and the reason saved.",request_id:requestId});
  }
  const withdrawalId=id();
- const inserted=await env.DB.prepare("INSERT INTO withdrawals(id,user_id,asset,amount_sats,amount_cents,destination,network,status,admin_note,reviewed_at) SELECT ?,u.id,'BTC',u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0),0,?,?, 'approved',?,CURRENT_TIMESTAMP FROM users u WHERE u.id=? AND u.activated=1 AND u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0)>0").bind(withdrawalId,request.destination,request.payment_method,reason,request.user_id).run();
- if(!inserted.meta.changes)return json({error:"This user has no unreserved HASH balance available for an early payout request."},409);
- await env.DB.prepare("UPDATE early_withdrawal_requests SET status='accepted',admin_reason=?,withdrawal_id=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'").bind(reason,withdrawalId,requestId).run();
- return json({message:"Early withdrawal request accepted. A manual payout record has been created; payment is not automatic.",request_id:requestId,withdrawal_id:withdrawalId});
+ const availableSql="u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0)";
+ const results=await env.DB.batch([
+  env.DB.prepare("INSERT INTO withdrawals(id,user_id,asset,amount_sats,amount_cents,destination,network,status,admin_note,reviewed_at) SELECT ?,u.id,'BTC',CAST(("+availableSql+")/2 AS INTEGER),0,?,?, 'approved',?,CURRENT_TIMESTAMP FROM users u WHERE u.id=? AND u.activated=1 AND ("+availableSql+")>=2").bind(withdrawalId,request.destination,request.payment_method,reason,request.user_id),
+  env.DB.prepare("INSERT INTO ledger(id,user_id,entry_type,amount_sats,amount_cents,status,reference,note) SELECT ?,w.user_id,'early_withdrawal_fee',-(u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0)),0,'completed',?,'50% early-withdrawal deduction applied when admin approved the exception' FROM withdrawals w JOIN users u ON u.id=w.user_id WHERE w.id=? AND w.status='approved' AND u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0)>0").bind(id(),withdrawalId,withdrawalId),
+  env.DB.prepare("UPDATE users SET mining_balance_sats=mining_balance_sats+(SELECT amount_sats FROM ledger WHERE reference=? AND entry_type='early_withdrawal_fee' AND status='completed'),updated_at=CURRENT_TIMESTAMP WHERE id=(SELECT user_id FROM withdrawals WHERE id=?) AND EXISTS(SELECT 1 FROM ledger WHERE reference=? AND entry_type='early_withdrawal_fee' AND status='completed')").bind(withdrawalId,withdrawalId,withdrawalId),
+  env.DB.prepare("UPDATE early_withdrawal_requests SET status='accepted',admin_reason=?,withdrawal_id=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending' AND EXISTS(SELECT 1 FROM withdrawals WHERE id=? AND status='approved')").bind(reason,withdrawalId,requestId,withdrawalId)
+ ]);
+ if(!results[0].meta.changes)return json({error:"This user has no sufficient unreserved HASH balance for an early payout request."},409);
+ const accepted=await env.DB.prepare("SELECT status FROM early_withdrawal_requests WHERE id=?").bind(requestId).first<any>();
+ if(accepted?.status!=="accepted")return json({error:"The early withdrawal could not be finalised. Please refresh and review the request status."},409);
+ return json({message:"Early withdrawal approved. 50% of the available HASH balance has been reserved for manual payout and the remaining 50% has been deducted as the early-withdrawal fee.",request_id:requestId,withdrawal_id:withdrawalId});
 }
 if(path==="/api/admin/withdrawals/action"&&req.method==="POST"){
  if(who.email!==env.ADMIN_EMAIL.toLowerCase())return json({error:"Admin access denied."},403);
