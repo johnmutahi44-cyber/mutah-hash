@@ -16,6 +16,16 @@ async function resetInactiveBalance(env:Env,me:any){
   await env.DB.prepare("INSERT OR IGNORE INTO ledger(id,user_id,entry_type,amount_sats,status,reference,note) VALUES(?,?, 'inactivity_reset',?,'completed',?,'Unreserved HASH rewards reset after 72 consecutive hours without a successful HASH claim')").bind(id(),me.id,-resetAmount,resetRef).run();
  }
 }
+const EARLY_WITHDRAWAL_MIN_USD=100;
+async function getBtcUsdSpotPrice():Promise<number>{
+ const response=await fetch("https://api.coinbase.com/v2/prices/BTC-USD/spot",{headers:{accept:"application/json"},signal:AbortSignal.timeout(7000)});
+ if(!response.ok)throw new Error("The live Bitcoin price is temporarily unavailable. Please try again shortly.");
+ const payload=await response.json() as any;
+ const price=Number(payload?.data?.amount);
+ if(!Number.isFinite(price)||price<1000||price>10000000)throw new Error("A valid live Bitcoin price could not be obtained. Please try again shortly.");
+ return price;
+}
+function minimumEarlyWithdrawalSats(btcUsd:number){return Math.ceil(EARLY_WITHDRAWAL_MIN_USD/btcUsd*100000000);}
 const HASH_SESSION_REWARD_SATS=15000;
 const HASH_SESSION_INTERVAL_MS=300000;
 // Kenya uses East Africa Time (UTC+3) year-round. Every AIRDROP session ends
@@ -135,6 +145,11 @@ if(path==="/api/early-withdrawals"&&req.method==="POST"){
  if(!activationDate||Number.isNaN(activationDate.getTime()))return json({error:"Your verified activation date is unavailable."},403);
  const opens=new Date(activationDate);opens.setMonth(opens.getMonth()+5);
  if(Date.now()>=opens.getTime())return json({error:"Your normal five-month withdrawal period has opened. Please use the standard withdrawal request form."},409);
+ let btcUsd:number;try{btcUsd=await getBtcUsdSpotPrice();}catch(error){return json({error:(error as Error).message||"Live Bitcoin pricing is temporarily unavailable. Please try again shortly."},503);}
+ const minimumSats=minimumEarlyWithdrawalSats(btcUsd);
+ const balanceRow=await env.DB.prepare("SELECT u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0) AS available_sats FROM users u WHERE u.id=? AND u.activated=1").bind(me.id).first<any>();
+ const availableSats=Math.max(0,Number(balanceRow?.available_sats||0));
+ if(availableSats<minimumSats)return json({error:"Early withdrawal requests require at least US$100 worth of available BTC-denominated HASH rewards. At the current BTC/USD rate of $"+btcUsd.toFixed(2)+", your available balance is approximately $"+(availableSats/100000000*btcUsd).toFixed(2)+". Keep earning until you reach the minimum."},403);
  const body=await req.json<any>(),reason=String(body.reason||"").trim(),documentName=String(body.documentName||"").slice(0,180),documentMime=String(body.documentMime||""),documentBase64=String(body.documentBase64||""),paymentMethod=String(body.paymentMethod||""),destinationRaw=String(body.destination||"").trim();
  if(reason.length<20||reason.length>2000)return json({error:"Explain your reason in at least 20 characters and no more than 2,000 characters."},400);
  if(!["application/pdf","image/jpeg","image/png"].includes(documentMime)||!documentName||!documentBase64)return json({error:"Upload one PDF, JPG or PNG supporting document."},400);
@@ -267,8 +282,12 @@ if(path==="/api/admin/early-withdrawals/action"&&req.method==="POST"){
   await env.DB.prepare("UPDATE early_withdrawal_requests SET status='declined',admin_reason=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending'").bind(reason,requestId).run();
   return json({message:"Early withdrawal request declined and the reason saved.",request_id:requestId});
  }
+ let approvalBtcUsd:number;try{approvalBtcUsd=await getBtcUsdSpotPrice();}catch(error){return json({error:(error as Error).message||"Live Bitcoin pricing is temporarily unavailable. Please try again shortly."},503);}
+ const approvalMinimumSats=minimumEarlyWithdrawalSats(approvalBtcUsd);
  const withdrawalId=id();
  const availableSql="u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0)";
+ const currentBalance=await env.DB.prepare("SELECT "+availableSql+" AS available_sats FROM users u WHERE u.id=? AND u.activated=1").bind(request.user_id).first<any>();
+ if(Math.max(0,Number(currentBalance?.available_sats||0))<approvalMinimumSats)return json({error:"This request cannot be approved because the user's available HASH balance is now below US$100 at the current BTC/USD rate."},409);
  const results=await env.DB.batch([
   env.DB.prepare("INSERT INTO withdrawals(id,user_id,asset,amount_sats,amount_cents,destination,network,status,admin_note,reviewed_at) SELECT ?,u.id,'BTC',CAST(("+availableSql+")/2 AS INTEGER),0,?,?, 'approved',?,CURRENT_TIMESTAMP FROM users u WHERE u.id=? AND u.activated=1 AND ("+availableSql+")>=2").bind(withdrawalId,request.destination,request.payment_method,reason,request.user_id),
   env.DB.prepare("INSERT INTO ledger(id,user_id,entry_type,amount_sats,amount_cents,status,reference,note) SELECT ?,w.user_id,'early_withdrawal_fee',-(u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0)),0,'completed',?,'50% early-withdrawal deduction applied when admin approved the exception' FROM withdrawals w JOIN users u ON u.id=w.user_id WHERE w.id=? AND w.status='approved' AND u.mining_balance_sats-COALESCE((SELECT SUM(amount_sats) FROM withdrawals WHERE user_id=u.id AND asset='BTC' AND status IN ('pending','approved')),0)>0").bind(id(),withdrawalId,withdrawalId),
